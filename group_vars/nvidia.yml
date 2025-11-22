@@ -1,0 +1,122 @@
+---
+# Group variables for all NVIDIA HPC/AI compute hosts
+# These variables apply to all hosts in the 'nvidia' group
+
+# SSH Connection Settings
+ansible_connection: ssh
+ansible_user: ubuntu
+ansible_port: 22
+
+# SSH Key Authentication
+ansible_ssh_private_key_file: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/ssh_private_key', decrypt=true) }}"
+
+# Python Interpreter
+ansible_python_interpreter: /usr/bin/python3
+
+# NVIDIA Driver Configuration
+nvidia_driver_version: "535"  # CUDA 12.2 compatible driver
+nvidia_driver_branch: "production"
+nvidia_driver_package: "cuda-drivers-{{ nvidia_driver_version }}"
+
+# CUDA Configuration
+cuda_version: "12.2"
+cuda_install_path: /usr/local/cuda
+cuda_runtime_version: "12.2"
+
+# GPU Configuration
+nvidia_gpu_model: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/gpu_model') }}"
+nvidia_gpu_count_per_node: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/gpu_count_per_node') }}"
+
+# MIG Configuration (for supported GPUs like A100, H100)
+nvidia_mig_enabled: false  # Set to true if using MIG-capable GPUs
+nvidia_mig_mode: "mixed"  # Options: all, mixed, none
+
+# Fabric Manager (for NVLink/NVSwitch systems)
+nvidia_fabric_manager_enabled: false
+nvidia_fabric_manager_version: "{{ nvidia_driver_version }}"
+
+# NVIDIA Container Toolkit
+nvidia_container_toolkit_enabled: true
+nvidia_container_runtime: nvidia
+
+# GPU Monitoring
+nvidia_dcgm_enabled: true  # NVIDIA Data Center GPU Manager
+nvidia_dcgm_port: 5555
+
+# InfiniBand/RDMA Configuration
+infiniband_enabled: true
+rdma_core_packages:
+  - rdma-core
+  - ibverbs-utils
+  - libibverbs-dev
+  - infiniband-diags
+
+# NCCL Configuration (for multi-GPU training)
+nccl_version: "2.18"
+nccl_debug: "INFO"
+nccl_ib_disable: 0  # Enable InfiniBand
+nccl_net_gdr_level: 5
+
+# Network Configuration
+hpc_network_fabric: infiniband  # Options: infiniband, ethernet
+hpc_network_speed: "200G"
+hpc_network_topology: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/network_topology') }}"
+
+# Cluster Management
+slurm_enabled: false  # Set to true if using Slurm workload manager
+kubernetes_enabled: false  # Set to true if using Kubernetes
+
+# Storage Configuration
+# Mount Weka file system for AI datasets
+weka_mount_enabled: true
+weka_mount_point: /mnt/weka
+weka_client_type: native  # Options: native, nfs
+
+# NFS Mount for Weka (if not using native client)
+weka_nfs_server: "{{ lookup('amazon.aws.aws_ssm', '/weka/cl1/shared/nfs_vip1') }}"
+weka_nfs_export: /default
+weka_nfs_options: "vers=3,hard,intr,rsize=1048576,wsize=1048576"
+
+# Performance Tuning
+# CPU Governor
+cpu_governor: performance
+
+# Hugepages
+hugepages_enabled: true
+hugepages_size: 2M
+hugepages_count: 4096
+
+# System Tuning
+sysctl_settings:
+  net.core.rmem_max: 268435456
+  net.core.wmem_max: 268435456
+  net.ipv4.tcp_rmem: "4096 87380 134217728"
+  net.ipv4.tcp_wmem: "4096 65536 134217728"
+  vm.swappiness: 10
+
+# Monitoring Configuration
+prometheus_node_exporter_enabled: true
+nvidia_gpu_exporter_enabled: true
+
+# Logging Configuration
+centralized_logging_enabled: true
+log_aggregator: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/log_aggregator') }}"
+
+# Security Configuration
+ssh_password_authentication: false
+firewall_enabled: true
+selinux_mode: permissive  # Set to enforcing for production
+
+# IPMI/Redfish Configuration
+ipmi_enabled: true
+ipmi_user: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/ipmi_user') }}"
+ipmi_password: "{{ lookup('amazon.aws.aws_ssm', '/nvidia/' + cluster_id + '/shared/ipmi_password', decrypt=true) }}"
+
+# Container Runtime
+docker_enabled: false
+containerd_enabled: true
+podman_enabled: false
+
+# GPU Health Checks
+gpu_healthcheck_enabled: true
+gpu_healthcheck_interval: 300  # seconds

@@ -1,0 +1,68 @@
+---
+# Ansible Playbook: Change hostname using AWS Systems Manager
+# This demonstrates the pattern used in the main repository:
+# - No SSH keys required
+# - No direct network access needed
+# - Connection via AWS SSM
+# - Configuration retrieved from AWS SSM Parameter Store at runtime
+
+- name: Change hostname using value from SSM Parameter Store
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Variable expansion: retrieve hostname from SSM Parameter Store at runtime
+    # This demonstrates the key pattern - no hardcoded configuration values
+    new_hostname: "{{ lookup('amazon.aws.aws_ssm', '/example/config/hostname') }}"
+
+  tasks:
+    - name: Display current hostname
+      ansible.builtin.debug:
+        msg: "Current hostname is: {{ ansible_hostname }}"
+
+    - name: Check connection method
+      ansible.builtin.debug:
+        msg: "Connected via: {{ ansible_connection }}"
+
+    - name: Display hostname retrieved from SSM
+      ansible.builtin.debug:
+        msg: "Setting hostname to: {{ new_hostname }} (from SSM Parameter Store)"
+
+    - name: Set hostname to {{ new_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ new_hostname }}"
+      register: hostname_result
+
+    - name: Update /etc/hosts with new hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.0\.1\s+localhost'
+        line: "127.0.0.1   localhost {{ new_hostname }}"
+        state: present
+
+    - name: Persist hostname across reboots (Amazon Linux 2023)
+      ansible.builtin.copy:
+        content: "{{ new_hostname }}\n"
+        dest: /etc/hostname
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: "Hostname changed to: {{ new_hostname }} (retrieved from /example/config/hostname)"
+
+    - name: Notify about reboot
+      ansible.builtin.debug:
+        msg: "NOTE: Hostname will be fully applied after reboot. Use 'hostname' command to verify."
+
+# Uncomment below to automatically reboot (optional)
+#    - name: Reboot the instance to apply hostname
+#      ansible.builtin.reboot:
+#        msg: "Rebooting to apply hostname change"
+#        connect_timeout: 5
+#        reboot_timeout: 300
+#        pre_reboot_delay: 0
+#        post_reboot_delay: 30
+#        test_command: uptime

@@ -1,0 +1,261 @@
+---
+# Ansible Playbook: Ceph Storage Cluster Setup
+#
+# Purpose: Configure Ceph distributed storage cluster with monitors, managers, and OSDs
+#
+# Usage:
+#   ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_ceph.yml
+#
+# This playbook demonstrates the Hybrid Cloud IaC pattern:
+# - Code stored in public GitHub (this file)
+# - Configuration data retrieved from AWS SSM Parameter Store at runtime
+# - No secrets in version control
+
+- name: Configure Ceph Storage Cluster
+  hosts: ceph
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Ceph dashboard password retrieved from SSM
+    dashboard_password: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/dashboard_password', decrypt=true) }}"
+
+  tasks:
+    - name: Display node information
+      ansible.builtin.debug:
+        msg: |
+          Configuring Ceph node: {{ inventory_hostname }}
+          Cluster: {{ cluster_id }}
+          IP Address: {{ ansible_host }}
+          Cluster Network: {{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/' + inventory_hostname + '/cluster_ip') }}
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Ceph packages
+      ansible.builtin.apt:
+        name:
+          - ceph
+          - ceph-mon
+          - ceph-mgr
+          - ceph-osd
+          - ceph-mds
+          - ceph-common
+          - python3-ceph
+          - ceph-volume
+        state: present
+
+    - name: Create Ceph configuration directory
+      ansible.builtin.file:
+        path: /etc/ceph
+        state: directory
+        mode: '0755'
+
+    - name: Configure Ceph cluster
+      ansible.builtin.template:
+        src: ../templates/ceph/ceph.conf.j2
+        dest: /etc/ceph/ceph.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Ceph services
+
+    - name: Create Ceph keyring directory
+      ansible.builtin.file:
+        path: /var/lib/ceph/bootstrap-osd
+        state: directory
+        mode: '0755'
+
+    - name: Configure Ceph monitor
+      when: inventory_hostname in ceph_mon_initial_members.split(',')
+      block:
+        - name: Create monitor keyring
+          ansible.builtin.command:
+            cmd: "ceph-authtool --create-keyring /tmp/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'"
+          args:
+            creates: /tmp/ceph.mon.keyring
+
+        - name: Generate monitor map
+          ansible.builtin.command:
+            cmd: "monmaptool --create --add {{ inventory_hostname }} {{ ansible_host }} --fsid {{ ceph_fsid }} /tmp/monmap"
+          args:
+            creates: /tmp/monmap
+
+        - name: Create monitor data directory
+          ansible.builtin.file:
+            path: "/var/lib/ceph/mon/ceph-{{ inventory_hostname }}"
+            state: directory
+            owner: ceph
+            group: ceph
+            mode: '0755'
+
+        - name: Populate monitor daemon
+          ansible.builtin.command:
+            cmd: "ceph-mon --mkfs -i {{ inventory_hostname }} --monmap /tmp/monmap --keyring /tmp/ceph.mon.keyring"
+          args:
+            creates: "/var/lib/ceph/mon/ceph-{{ inventory_hostname }}/done"
+
+        - name: Enable Ceph monitor service
+          ansible.builtin.systemd:
+            name: "ceph-mon@{{ inventory_hostname }}"
+            enabled: yes
+            state: started
+
+    - name: Configure Ceph manager
+      block:
+        - name: Create manager data directory
+          ansible.builtin.file:
+            path: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}"
+            state: directory
+            owner: ceph
+            group: ceph
+            mode: '0755'
+
+        - name: Create manager authentication keyring
+          ansible.builtin.command:
+            cmd: "ceph auth get-or-create mgr.{{ inventory_hostname }} mon 'allow profile mgr' osd 'allow *' mds 'allow *'"
+          register: mgr_keyring
+          changed_when: false
+
+        - name: Save manager keyring
+          ansible.builtin.copy:
+            content: "{{ mgr_keyring.stdout }}"
+            dest: "/var/lib/ceph/mgr/ceph-{{ inventory_hostname }}/keyring"
+            owner: ceph
+            group: ceph
+            mode: '0600'
+
+        - name: Enable Ceph manager service
+          ansible.builtin.systemd:
+            name: "ceph-mgr@{{ inventory_hostname }}"
+            enabled: yes
+            state: started
+
+    - name: Enable Ceph manager modules
+      ansible.builtin.command:
+        cmd: "ceph mgr module enable {{ item }}"
+      loop: "{{ ceph_mgr_modules }}"
+      register: mgr_module_result
+      changed_when: "'enabled' in mgr_module_result.stdout"
+      when: inventory_hostname == groups['ceph'][0]
+
+    - name: Configure Ceph dashboard
+      when: ceph_dashboard_enabled | bool and inventory_hostname == groups['ceph'][0]
+      block:
+        - name: Create dashboard admin user
+          ansible.builtin.command:
+            cmd: "echo '{{ dashboard_password }}' | ceph dashboard ac-user-create {{ ceph_dashboard_admin_user }} -i - administrator"
+          register: dashboard_user_result
+          failed_when: dashboard_user_result.rc != 0 and 'already exists' not in dashboard_user_result.stderr
+          changed_when: dashboard_user_result.rc == 0
+          no_log: true
+
+        - name: Get dashboard access URL
+          ansible.builtin.command:
+            cmd: ceph mgr services
+          register: mgr_services
+          changed_when: false
+
+        - name: Display dashboard URL
+          ansible.builtin.debug:
+            msg: "Ceph Dashboard URL: {{ mgr_services.stdout | from_json | json_query('dashboard') }}"
+
+    - name: Configure OSDs
+      block:
+        - name: List available block devices
+          ansible.builtin.command:
+            cmd: lsblk -d -n -o NAME,SIZE
+          register: block_devices
+          changed_when: false
+
+        - name: Display available devices
+          ansible.builtin.debug:
+            var: block_devices.stdout_lines
+
+        - name: Create OSDs from available devices
+          ansible.builtin.command:
+            cmd: "ceph-volume lvm create --data /dev/{{ item }}"
+          loop: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/' + inventory_hostname + '/osd_devices').split(',') }}"
+          register: osd_create_result
+          failed_when: osd_create_result.rc != 0 and 'already in use' not in osd_create_result.stderr
+          changed_when: osd_create_result.rc == 0
+
+    - name: Create Ceph pools
+      when: inventory_hostname == groups['ceph'][0]
+      block:
+        - name: Create RBD and CephFS pools
+          ansible.builtin.command:
+            cmd: "ceph osd pool create {{ item.name }} {{ item.pg_num }}"
+          loop: "{{ ceph_pools }}"
+          register: pool_create_result
+          failed_when: pool_create_result.rc != 0 and 'already exists' not in pool_create_result.stderr
+          changed_when: pool_create_result.rc == 0
+
+        - name: Set pool application
+          ansible.builtin.command:
+            cmd: "ceph osd pool application enable {{ item.name }} {{ item.application }}"
+          loop: "{{ ceph_pools }}"
+          register: pool_app_result
+          changed_when: "'enabled' in pool_app_result.stdout"
+
+        - name: Set pool size and min_size
+          ansible.builtin.command:
+            cmd: "ceph osd pool set {{ item.name }} size {{ item.size }} && ceph osd pool set {{ item.name }} min_size {{ item.min_size }}"
+          loop: "{{ ceph_pools }}"
+          register: pool_size_result
+          changed_when: "'set' in pool_size_result.stdout"
+
+    - name: Create CephFS filesystems
+      when: inventory_hostname == groups['ceph'][0]
+      block:
+        - name: Create CephFS metadata servers
+          ansible.builtin.command:
+            cmd: "ceph fs new {{ item.name }} {{ item.metadata_pool }} {{ item.data_pool }}"
+          loop: "{{ cephfs_filesystems }}"
+          register: cephfs_create_result
+          failed_when: cephfs_create_result.rc != 0 and 'already exists' not in cephfs_create_result.stderr
+          changed_when: cephfs_create_result.rc == 0
+
+    - name: Enable PG autoscaler
+      ansible.builtin.command:
+        cmd: "ceph osd pool set {{ item.name }} pg_autoscale_mode {{ ceph_pg_autoscale_mode }}"
+      loop: "{{ ceph_pools }}"
+      when: inventory_hostname == groups['ceph'][0]
+      register: autoscale_result
+      changed_when: "'set' in autoscale_result.stdout"
+
+    - name: Verify Ceph cluster health
+      ansible.builtin.command:
+        cmd: ceph health detail
+      register: cluster_health
+      changed_when: false
+      when: inventory_hostname == groups['ceph'][0]
+
+    - name: Display cluster health
+      ansible.builtin.debug:
+        var: cluster_health.stdout_lines
+      when: inventory_hostname == groups['ceph'][0]
+
+    - name: Get Ceph cluster status
+      ansible.builtin.command:
+        cmd: ceph -s
+      register: cluster_status
+      changed_when: false
+      when: inventory_hostname == groups['ceph'][0]
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        var: cluster_status.stdout_lines
+      when: inventory_hostname == groups['ceph'][0]
+
+  handlers:
+    - name: Restart Ceph services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - ceph-mon.target
+        - ceph-mgr.target
+        - ceph-osd.target

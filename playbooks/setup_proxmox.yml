@@ -1,0 +1,190 @@
+---
+# Ansible Playbook: Proxmox VE Cluster Setup
+#
+# Purpose: Configure Proxmox VE cluster nodes with storage, networking, and GPU support
+#
+# Usage:
+#   ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml
+#
+# This playbook demonstrates the Hybrid Cloud IaC pattern:
+# - Code stored in public GitHub (this file)
+# - Configuration data retrieved from AWS SSM Parameter Store at runtime
+# - No secrets in version control
+
+- name: Configure Proxmox VE Cluster
+  hosts: proxmox
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Cluster API token retrieved from SSM
+    pve_api_token: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/token', decrypt=true) }}"
+
+  tasks:
+    - name: Display node information
+      ansible.builtin.debug:
+        msg: |
+          Configuring Proxmox node: {{ inventory_hostname }}
+          Cluster: {{ cluster_id }}
+          IP Address: {{ ansible_host }}
+          System Type: {{ system_type }}
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required Proxmox packages
+      ansible.builtin.apt:
+        name:
+          - proxmox-ve
+          - postfix
+          - open-iscsi
+          - nfs-common
+          - ceph-common
+        state: present
+
+    - name: Configure Proxmox repository
+      ansible.builtin.template:
+        src: ../templates/proxmox/pve-sources.list.j2
+        dest: /etc/apt/sources.list.d/pve-install-repo.list
+        owner: root
+        group: root
+        mode: '0644'
+      when: proxmox_repository is defined
+
+    - name: Configure network interfaces
+      ansible.builtin.template:
+        src: ../templates/proxmox/interfaces.j2
+        dest: /etc/network/interfaces
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart networking
+
+    - name: Create Linux bridge for host OS VLAN
+      ansible.builtin.command:
+        cmd: "pvesh create /nodes/{{ inventory_hostname }}/network --iface vmbr0 --type bridge --bridge_ports bond0.{{ proxmox_host_vlan | regex_replace('vlan', '') }}"
+      register: bridge_result
+      failed_when: bridge_result.rc != 0 and 'already exists' not in bridge_result.stderr
+      changed_when: bridge_result.rc == 0
+
+    - name: Create Linux bridges for VM/LXC VLANs
+      ansible.builtin.command:
+        cmd: "pvesh create /nodes/{{ inventory_hostname }}/network --iface vmbr{{ idx + 1 }} --type bridge --bridge_ports bond0.{{ item | regex_replace('vlan', '') }}"
+      loop: "{{ proxmox_vm_vlans }}"
+      loop_control:
+        index_var: idx
+      register: vm_bridge_result
+      failed_when: vm_bridge_result.rc != 0 and 'already exists' not in vm_bridge_result.stderr
+      changed_when: vm_bridge_result.rc == 0
+
+    - name: Configure Ceph storage
+      when: proxmox_storage_backend == 'ceph'
+      block:
+        - name: Install Ceph packages
+          ansible.builtin.apt:
+            name:
+              - ceph
+              - ceph-mon
+              - ceph-mgr
+              - ceph-osd
+            state: present
+
+        - name: Configure Ceph cluster
+          ansible.builtin.template:
+            src: ../templates/proxmox/ceph.conf.j2
+            dest: /etc/ceph/ceph.conf
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Create Ceph monitor
+          ansible.builtin.command:
+            cmd: "pveceph mon create"
+          when: inventory_hostname in ceph_mon_initial_members.split(',')
+          register: mon_create_result
+          failed_when: mon_create_result.rc != 0 and 'already exists' not in mon_create_result.stderr
+          changed_when: mon_create_result.rc == 0
+
+    - name: Configure NVIDIA GPU
+      when: proxmox_gpu_vendor == 'nvidia'
+      block:
+        - name: Install NVIDIA drivers
+          ansible.builtin.apt:
+            name:
+              - nvidia-driver
+              - nvidia-smi
+            state: present
+
+        - name: Enable NVIDIA MIG mode
+          ansible.builtin.command:
+            cmd: nvidia-smi -mig 1
+          when: proxmox_gpu_mig_enabled | bool
+          register: mig_result
+          changed_when: "'Enabled MIG mode' in mig_result.stdout"
+
+        - name: Configure MIG profiles
+          ansible.builtin.command:
+            cmd: "nvidia-smi mig -cgi {{ proxmox_gpu_mig_profile }}"
+          when: proxmox_gpu_mig_enabled | bool
+          register: mig_profile_result
+          failed_when: mig_profile_result.rc != 0 and 'already exists' not in mig_profile_result.stderr
+          changed_when: mig_profile_result.rc == 0
+
+    - name: Mount Weka filesystem
+      when: weka_mount_enabled | bool
+      block:
+        - name: Create Weka mount point
+          ansible.builtin.file:
+            path: "{{ weka_mount_point }}"
+            state: directory
+            mode: '0755'
+
+        - name: Add Weka NFS mount to fstab
+          ansible.builtin.mount:
+            path: "{{ weka_mount_point }}"
+            src: "{{ weka_nfs_server }}:/default"
+            fstype: nfs
+            opts: "vers=3,hard,intr,rsize=1048576,wsize=1048576"
+            state: mounted
+
+    - name: Configure Proxmox HA
+      when: ha_enabled | bool
+      block:
+        - name: Configure fencing via Redfish
+          ansible.builtin.command:
+            cmd: "ha-manager add {{ inventory_hostname }} --fencing-device redfish://{{ ansible_host }}:{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/' + inventory_hostname + '/ipmi_port') }}"
+          register: fencing_result
+          failed_when: fencing_result.rc != 0 and 'already exists' not in fencing_result.stderr
+          changed_when: fencing_result.rc == 0
+
+    - name: Configure monitoring
+      when: prometheus_enabled | bool
+      block:
+        - name: Install Prometheus node exporter
+          ansible.builtin.apt:
+            name: prometheus-node-exporter
+            state: present
+
+        - name: Start node exporter service
+          ansible.builtin.systemd:
+            name: prometheus-node-exporter
+            state: started
+            enabled: yes
+
+    - name: Verify Proxmox cluster status
+      ansible.builtin.command:
+        cmd: pvecm status
+      register: cluster_status
+      changed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        var: cluster_status.stdout_lines
+
+  handlers:
+    - name: Restart networking
+      ansible.builtin.systemd:
+        name: networking
+        state: restarted

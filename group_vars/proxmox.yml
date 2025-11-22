@@ -1,0 +1,81 @@
+---
+# Group variables for all Proxmox VE hosts
+# These variables apply to all hosts in the 'proxmox' group
+
+# SSH Connection Settings
+ansible_connection: ssh
+ansible_user: root
+ansible_port: 22
+
+# SSH Key Authentication
+# SSH keys are stored in AWS SSM Parameter Store as SecureString
+# The lookup plugin retrieves them at runtime
+ansible_ssh_private_key_file: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/ssh_private_key', decrypt=true) }}"
+
+# Python Interpreter
+ansible_python_interpreter: /usr/bin/python3
+
+# Proxmox Configuration
+proxmox_version: "9.0"
+proxmox_repository: "pve-no-subscription"  # Change to 'pve-enterprise' when subscription is purchased
+
+# Cluster Configuration
+proxmox_cluster_name: pve1
+
+# Network Configuration
+proxmox_host_vlan: vlan6  # Isolated host OS VLAN (sysadmin access only)
+proxmox_vm_vlans:
+  - vlan1
+  - vlan2
+  - vlan3
+  - vlan4
+  - vlan5
+
+# Storage Configuration
+proxmox_storage_backend: ceph  # Options: ceph, zfs-draid
+proxmox_ceph_replication: 3
+proxmox_ceph_min_size: 2
+
+# Ceph Network Configuration
+ceph_public_network: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/ceph_public_network') }}"
+ceph_cluster_network: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/ceph_cluster_network') }}"
+
+# GPU Configuration
+proxmox_gpu_vendor: nvidia
+proxmox_gpu_model: A16
+proxmox_gpu_mig_enabled: true
+proxmox_gpu_mig_profile: "3g.20gb"
+
+# Monitoring Configuration
+prometheus_enabled: true
+grafana_enabled: true
+
+# Backup Configuration
+pbs_enabled: true
+pbs_server: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/pbs_server') }}"
+
+# Authentication Configuration
+# Active Directory integration
+ad_server: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/ad_server') }}"
+ad_domain: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/ad_domain') }}"
+
+# Two-Factor Authentication (Duo)
+duo_enabled: true
+duo_api_host: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/duo_api_host') }}"
+duo_integration_key: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/duo_integration_key', decrypt=true) }}"
+duo_secret_key: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/duo_secret_key', decrypt=true) }}"
+
+# Logging Configuration
+# Microsoft Defender XDR integration
+defender_xdr_workspace_id: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/defender_xdr_workspace_id') }}"
+defender_xdr_primary_key: "{{ lookup('amazon.aws.aws_ssm', '/proxmox/' + cluster_id + '/shared/defender_xdr_primary_key', decrypt=true) }}"
+
+# HA Configuration
+ha_enabled: true
+ha_fencing_method: redfish  # Options: redfish, ipmi
+ha_fencing_timeout: 60
+
+# Weka Integration
+weka_mount_enabled: true
+weka_mount_point: /mnt/weka
+weka_nfs_server: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/nfs_vip1') }}"

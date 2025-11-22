@@ -1,0 +1,97 @@
+---
+# Group variables for all Weka file system hosts
+# These variables apply to all hosts in the 'weka' group
+
+# SSH Connection Settings
+ansible_connection: ssh
+ansible_user: root
+ansible_port: 22
+
+# SSH Key Authentication
+ansible_ssh_private_key_file: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/ssh_private_key', decrypt=true) }}"
+
+# Python Interpreter
+ansible_python_interpreter: /usr/bin/python3
+
+# Weka Cluster Configuration
+weka_cluster_name: "weka-{{ cluster_id }}"
+weka_admin_password: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/admin_pw', decrypt=true) }}"
+
+# Weka Installation
+weka_version: "latest"
+weka_install_method: "wms"  # Options: wms, installer, cloud-init
+
+# Network Configuration
+weka_data_nics:
+  - eth0
+  - eth1
+
+# NIC Bonding Configuration
+weka_bonding_enabled: true
+weka_bonding_mode: 4  # LACP Mode 4 for active-active bonding
+weka_bonding_miimon: 100
+
+# Cluster Network (200G)
+weka_cluster_nics:
+  - eth2
+  - eth3
+
+# Service VIPs (RRDNS)
+weka_nfs_vips:
+  - "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/nfs_vip1') }}"
+  - "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/nfs_vip2') }}"
+
+weka_smb_vips:
+  - "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/smb_vip1') }}"
+  - "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/smb_vip2') }}"
+  - "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/smb_vip3') }}"
+
+# Storage Configuration
+weka_drives_per_node: 6
+weka_drive_type: "PM1743"  # Samsung PM1743 15.3TB NVMe
+weka_drive_size: "15.3TB"
+
+# Filesystem Configuration
+weka_filesystems:
+  - name: "default"
+    size: "800TB"
+    thin_provisioned: true
+
+# Protocol Configuration
+weka_nfs_enabled: true
+weka_smb_enabled: true
+weka_s3_enabled: true
+
+# NFS Configuration
+weka_nfs_version: "3,4"
+weka_nfs_async: false
+
+# SMB Configuration
+weka_smb_domain: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/smb_domain') }}"
+weka_smb_workgroup: "WORKGROUP"
+
+# S3 Configuration
+weka_s3_port: 9000
+weka_s3_access_key: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/s3_access_key', decrypt=true) }}"
+weka_s3_secret_key: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/s3_secret_key', decrypt=true) }}"
+
+# Monitoring Configuration
+weka_monitoring_enabled: true
+weka_prometheus_port: 8001
+
+# Performance Tuning
+weka_io_threads: 8
+weka_compute_threads: 8
+weka_frontend_threads: 4
+
+# High Availability
+weka_ha_enabled: true
+weka_failure_domains: 3
+
+# Management Network
+weka_mgmt_vlan: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/mgmt_vlan') }}"
+
+# IPMI/Redfish Configuration
+ipmi_enabled: true
+ipmi_user: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/ipmi_user') }}"
+ipmi_password: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/ipmi_password', decrypt=true) }}"

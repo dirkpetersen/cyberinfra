@@ -1,0 +1,37 @@
+---
+# Ansible AWS EC2 Dynamic Inventory Configuration
+# This queries AWS EC2 API at runtime to discover instances
+
+plugin: amazon.aws.aws_ec2
+
+# AWS Region (change if your instance is in a different region)
+regions:
+  - us-west-2
+
+# Filter instances by tag
+filters:
+  tag:Name: ansible-ssm-test
+  instance-state-name: running
+
+# Use instance ID as the inventory hostname
+# This is important for SSM connection
+hostnames:
+  - instance-id
+
+# Use SSM connection instead of SSH
+# This is the key that makes SSM work instead of traditional SSH
+compose:
+  # SSM connection plugin
+  ansible_connection: "'community.aws.aws_ssm'"
+  ansible_aws_ssm_region: "'us-west-2'"
+  # S3 bucket for session data - format: ansible-ssm-{account-id}-{region}
+  # This bucket is created automatically by launch-instance.sh
+  ansible_aws_ssm_bucket_name: "'ansible-ssm-405644541454-us-west-2'"
+  ansible_aws_ssm_plugin: "'/usr/local/bin/session-manager-plugin'"
+
+# Optional: Group instances by tags for easier targeting
+keyed_groups:
+  - key: tags.Name
+    prefix: tag_name
+  - key: instance_type
+    prefix: instance_type

@@ -1,0 +1,122 @@
+---
+# Group variables for all Ceph storage hosts
+# These variables apply to all hosts in the 'ceph' group
+# Note: In this infrastructure, Ceph runs on Proxmox nodes, so many settings overlap
+
+# SSH Connection Settings
+ansible_connection: ssh
+ansible_user: root
+ansible_port: 22
+
+# SSH Key Authentication
+ansible_ssh_private_key_file: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/ssh_private_key', decrypt=true) }}"
+
+# Python Interpreter
+ansible_python_interpreter: /usr/bin/python3
+
+# Ceph Cluster Configuration
+ceph_cluster_name: "ceph-{{ cluster_id }}"
+ceph_origin: distro  # Install from distribution packages
+ceph_repository: community
+
+# Ceph Version
+ceph_release: reef  # Latest LTS release (Ceph 18.x)
+
+# Network Configuration
+ceph_public_network: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/public_network') }}"
+ceph_cluster_network: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/cluster_network') }}"
+
+# Monitor Configuration
+ceph_mon_host: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/mon_hosts') }}"
+ceph_mon_initial_members: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/mon_initial_members') }}"
+
+# OSD Configuration
+ceph_osd_objectstore: bluestore
+ceph_osd_scenario: lvm  # Use LVM for OSD deployment
+
+# Pool Configuration
+ceph_pools:
+  - name: rbd-vms
+    pg_num: 128
+    pgp_num: 128
+    rule_name: replicated_rule
+    application: rbd
+    size: 3
+    min_size: 2
+    percent_total_data: 60
+
+  - name: rbd-containers
+    pg_num: 64
+    pgp_num: 64
+    rule_name: replicated_rule
+    application: rbd
+    size: 3
+    min_size: 2
+    percent_total_data: 30
+
+  - name: cephfs-data
+    pg_num: 32
+    pgp_num: 32
+    rule_name: replicated_rule
+    application: cephfs
+    size: 3
+    min_size: 2
+    percent_total_data: 8
+
+  - name: cephfs-metadata
+    pg_num: 16
+    pgp_num: 16
+    rule_name: replicated_rule
+    application: cephfs
+    size: 3
+    min_size: 2
+    percent_total_data: 2
+
+# Replication Configuration
+ceph_replication_size: 3
+ceph_replication_min_size: 2
+
+# CephFS Configuration
+cephfs_filesystems:
+  - name: cephfs
+    data_pool: cephfs-data
+    metadata_pool: cephfs-metadata
+
+# RBD Configuration
+rbd_cache_enabled: true
+rbd_cache_max_dirty: "24MiB"
+rbd_cache_target_dirty: "16MiB"
+
+# Performance Tuning
+ceph_osd_memory_target: 4294967296  # 4GB per OSD
+ceph_osd_max_backfills: 1
+ceph_osd_recovery_max_active: 3
+
+# Authentication
+cephx: true
+ceph_fsid: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/fsid') }}"
+
+# Dashboard Configuration
+ceph_dashboard_enabled: true
+ceph_dashboard_admin_user: admin
+ceph_dashboard_admin_password: "{{ lookup('amazon.aws.aws_ssm', '/ceph/' + cluster_id + '/shared/dashboard_password', decrypt=true) }}"
+
+# Monitoring
+ceph_monitoring_enabled: true
+ceph_prometheus_port: 9283
+ceph_grafana_enabled: true
+
+# Manager Configuration
+ceph_mgr_modules:
+  - dashboard
+  - prometheus
+  - balancer
+  - pg_autoscaler
+
+# Automatic PG Scaling
+ceph_pg_autoscale_mode: "on"
+
+# Scrubbing Configuration
+ceph_osd_scrub_begin_hour: 22
+ceph_osd_scrub_end_hour: 6
+ceph_osd_deep_scrub_interval: 604800  # 1 week

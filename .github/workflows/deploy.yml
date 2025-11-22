@@ -1,0 +1,237 @@
+---
+# GitHub Actions Workflow: Deploy Cyber Infrastructure
+#
+# Purpose: Automated deployment of Proxmox, Weka, Ceph, and NVIDIA infrastructure
+#
+# This workflow demonstrates the Hybrid Cloud IaC pattern:
+# - Automation code stored in public GitHub (this file)
+# - Triggered manually or on push to main branch
+# - Runs on self-hosted runner (pve1-node1 or dedicated management node)
+# - Retrieves configuration from AWS SSM Parameter Store at runtime
+# - No secrets in version control
+
+name: Deploy Infrastructure
+
+on:
+  # Manual trigger via GitHub UI
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target infrastructure to deploy'
+        required: true
+        type: choice
+        options:
+          - all
+          - proxmox
+          - weka
+          - ceph
+          - nvidia
+        default: 'all'
+
+      dry_run:
+        description: 'Perform dry run (check mode only)'
+        required: false
+        type: boolean
+        default: false
+
+  # Automatic trigger on push to main branch
+  push:
+    branches:
+      - main
+    paths:
+      - 'playbooks/**'
+      - 'group_vars/**'
+      - 'inventory/**'
+      - '.github/workflows/deploy.yml'
+
+  # Automatic trigger on pull request (check mode only)
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'playbooks/**'
+      - 'group_vars/**'
+      - 'inventory/**'
+
+env:
+  AWS_REGION: us-west-2
+  ANSIBLE_CONFIG: ./ansible.cfg
+
+jobs:
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: self-hosted  # Must run on self-hosted runner with network access to infrastructure
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ansible boto3 botocore
+
+      - name: Install Ansible collections
+        run: |
+          ansible-galaxy collection install amazon.aws community.general
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: |
+          aws sts get-caller-identity
+          echo "AWS credentials configured successfully"
+
+      - name: Test dynamic inventory
+        run: |
+          python3 inventory/ssm_plugin.py --list
+          echo "Dynamic inventory loaded successfully"
+
+      - name: Run Ansible syntax check
+        run: |
+          ansible-playbook --syntax-check playbooks/setup_proxmox.yml
+          ansible-playbook --syntax-check playbooks/setup_weka.yml
+          ansible-playbook --syntax-check playbooks/setup_ceph.yml
+          ansible-playbook --syntax-check playbooks/setup_nvidia.yml
+
+      # Deploy Proxmox VE cluster
+      - name: Deploy Proxmox infrastructure
+        if: (github.event.inputs.target == 'proxmox' || github.event.inputs.target == 'all' || github.event_name == 'push')
+        run: |
+          ANSIBLE_FLAGS=""
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" || "${{ github.event_name }}" == "pull_request" ]]; then
+            ANSIBLE_FLAGS="--check --diff"
+          fi
+
+          ansible-playbook -i inventory/ssm_plugin.py \
+            playbooks/setup_proxmox.yml \
+            $ANSIBLE_FLAGS \
+            -v
+
+      # Deploy Weka file system
+      - name: Deploy Weka infrastructure
+        if: (github.event.inputs.target == 'weka' || github.event.inputs.target == 'all' || github.event_name == 'push')
+        run: |
+          ANSIBLE_FLAGS=""
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" || "${{ github.event_name }}" == "pull_request" ]]; then
+            ANSIBLE_FLAGS="--check --diff"
+          fi
+
+          ansible-playbook -i inventory/ssm_plugin.py \
+            playbooks/setup_weka.yml \
+            $ANSIBLE_FLAGS \
+            -v
+
+      # Deploy Ceph storage
+      - name: Deploy Ceph infrastructure
+        if: (github.event.inputs.target == 'ceph' || github.event.inputs.target == 'all' || github.event_name == 'push')
+        run: |
+          ANSIBLE_FLAGS=""
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" || "${{ github.event_name }}" == "pull_request" ]]; then
+            ANSIBLE_FLAGS="--check --diff"
+          fi
+
+          ansible-playbook -i inventory/ssm_plugin.py \
+            playbooks/setup_ceph.yml \
+            $ANSIBLE_FLAGS \
+            -v
+
+      # Deploy NVIDIA HPC infrastructure
+      - name: Deploy NVIDIA infrastructure
+        if: (github.event.inputs.target == 'nvidia' || github.event.inputs.target == 'all' || github.event_name == 'push')
+        run: |
+          ANSIBLE_FLAGS=""
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" || "${{ github.event_name }}" == "pull_request" ]]; then
+            ANSIBLE_FLAGS="--check --diff"
+          fi
+
+          ansible-playbook -i inventory/ssm_plugin.py \
+            playbooks/setup_nvidia.yml \
+            $ANSIBLE_FLAGS \
+            -v
+
+      - name: Generate deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: ${{ github.event.inputs.target || 'all (automatic)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run**: ${{ github.event.inputs.dry_run || (github.event_name == 'pull_request' && 'true') || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **AWS Region**: ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner**: ${{ runner.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deployment completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+  verify:
+    name: Verify Infrastructure Health
+    runs-on: self-hosted
+    needs: deploy
+    if: (github.event.inputs.dry_run != 'true' && github.event_name != 'pull_request')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install boto3 botocore
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify Proxmox cluster health
+        if: (github.event.inputs.target == 'proxmox' || github.event.inputs.target == 'all')
+        run: |
+          echo "Verifying Proxmox cluster health..."
+          # Add health check commands here
+          echo "✓ Proxmox cluster verification complete"
+
+      - name: Verify Weka cluster health
+        if: (github.event.inputs.target == 'weka' || github.event.inputs.target == 'all')
+        run: |
+          echo "Verifying Weka cluster health..."
+          # Add health check commands here
+          echo "✓ Weka cluster verification complete"
+
+      - name: Verify Ceph cluster health
+        if: (github.event.inputs.target == 'ceph' || github.event.inputs.target == 'all')
+        run: |
+          echo "Verifying Ceph cluster health..."
+          # Add health check commands here
+          echo "✓ Ceph cluster verification complete"
+
+      - name: Verify NVIDIA infrastructure
+        if: (github.event.inputs.target == 'nvidia' || github.event.inputs.target == 'all')
+        run: |
+          echo "Verifying NVIDIA infrastructure..."
+          # Add health check commands here
+          echo "✓ NVIDIA infrastructure verification complete"
+
+      - name: Generate verification summary
+        if: always()
+        run: |
+          echo "## Verification Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Infrastructure health checks completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

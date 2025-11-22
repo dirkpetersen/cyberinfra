@@ -1,0 +1,8 @@
+# Ignore instance ID file (contains AWS resource IDs)
+instance-id.txt
+
+# Ignore Ansible retry files
+*.retry
+
+# Ignore any cached inventory
+.ansible_cache/

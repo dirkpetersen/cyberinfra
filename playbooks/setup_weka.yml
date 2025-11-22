@@ -1,0 +1,204 @@
+---
+# Ansible Playbook: Weka File System Cluster Setup
+#
+# Purpose: Configure Weka file system nodes with networking, storage, and multi-protocol access
+#
+# Usage:
+#   ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_weka.yml
+#
+# This playbook demonstrates the Hybrid Cloud IaC pattern:
+# - Code stored in public GitHub (this file)
+# - Configuration data retrieved from AWS SSM Parameter Store at runtime
+# - No secrets in version control
+
+- name: Configure Weka File System Cluster
+  hosts: weka
+  gather_facts: yes
+  become: yes
+
+  vars:
+    # Weka admin password retrieved from SSM
+    weka_admin_pw: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/shared/admin_pw', decrypt=true) }}"
+
+  tasks:
+    - name: Display node information
+      ansible.builtin.debug:
+        msg: |
+          Configuring Weka node: {{ inventory_hostname }}
+          Cluster: {{ cluster_id }}
+          IP Address: {{ ansible_host }}
+          Container ID: {{ container_id }}
+
+    - name: Update system packages
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - curl
+          - wget
+          - jq
+          - net-tools
+          - ifenslave
+          - vlan
+        state: present
+
+    - name: Load bonding kernel module
+      ansible.builtin.modprobe:
+        name: bonding
+        state: present
+
+    - name: Load 8021q VLAN kernel module
+      ansible.builtin.modprobe:
+        name: 8021q
+        state: present
+
+    - name: Configure NIC bonding for data NICs
+      when: weka_bonding_enabled | bool
+      block:
+        - name: Create bonding configuration
+          ansible.builtin.template:
+            src: ../templates/weka/bond0.conf.j2
+            dest: /etc/network/interfaces.d/bond0
+            owner: root
+            group: root
+            mode: '0644'
+          notify: Restart networking
+
+        - name: Configure bonding mode (LACP Mode 4)
+          ansible.builtin.copy:
+            content: |
+              alias bond0 bonding
+              options bonding mode={{ weka_bonding_mode }} miimon={{ weka_bonding_miimon }}
+            dest: /etc/modprobe.d/bonding.conf
+            owner: root
+            group: root
+            mode: '0644'
+
+    - name: Download Weka installer
+      ansible.builtin.get_url:
+        url: "https://{{ weka_nfs_vips[0] }}/dist/v1/install"
+        dest: /tmp/weka-install.sh
+        mode: '0755'
+      when: weka_install_method == 'installer'
+
+    - name: Install Weka software
+      ansible.builtin.command:
+        cmd: bash /tmp/weka-install.sh
+      when: weka_install_method == 'installer'
+      register: weka_install_result
+      changed_when: "'Successfully installed' in weka_install_result.stdout"
+
+    - name: Configure Weka container
+      ansible.builtin.command:
+        cmd: "weka local setup container --name {{ container_id }} --management-ips {{ ansible_host }} --data-ips {{ ansible_host }}"
+      register: container_setup_result
+      failed_when: container_setup_result.rc != 0 and 'already exists' not in container_setup_result.stderr
+      changed_when: container_setup_result.rc == 0
+
+    - name: Join Weka cluster
+      ansible.builtin.command:
+        cmd: "weka cluster join {{ weka_nfs_vips[0] }} --admin-password {{ weka_admin_pw }}"
+      register: cluster_join_result
+      failed_when: cluster_join_result.rc != 0 and 'already member' not in cluster_join_result.stderr
+      changed_when: cluster_join_result.rc == 0
+
+    - name: Configure Weka drives
+      ansible.builtin.command:
+        cmd: "weka cluster drive add {{ item }}"
+      loop: "{{ lookup('amazon.aws.aws_ssm', '/weka/' + cluster_id + '/' + inventory_hostname + '/drives').split(',') }}"
+      register: drive_add_result
+      failed_when: drive_add_result.rc != 0 and 'already exists' not in drive_add_result.stderr
+      changed_when: drive_add_result.rc == 0
+
+    - name: Configure NFS service
+      when: weka_nfs_enabled | bool
+      block:
+        - name: Enable NFS protocol
+          ansible.builtin.command:
+            cmd: "weka nfs interface-group add nfs-group {{ ansible_host }}"
+          register: nfs_group_result
+          failed_when: nfs_group_result.rc != 0 and 'already exists' not in nfs_group_result.stderr
+          changed_when: nfs_group_result.rc == 0
+
+        - name: Configure NFS service VIPs
+          ansible.builtin.command:
+            cmd: "weka nfs interface-group port add nfs-group {{ item }}"
+          loop: "{{ weka_nfs_vips }}"
+          register: nfs_vip_result
+          failed_when: nfs_vip_result.rc != 0 and 'already exists' not in nfs_vip_result.stderr
+          changed_when: nfs_vip_result.rc == 0
+
+    - name: Configure SMB service
+      when: weka_smb_enabled | bool
+      block:
+        - name: Enable SMB protocol
+          ansible.builtin.command:
+            cmd: "weka smb domain join {{ weka_smb_domain }} --admin-password {{ weka_admin_pw }}"
+          register: smb_domain_result
+          failed_when: smb_domain_result.rc != 0 and 'already joined' not in smb_domain_result.stderr
+          changed_when: smb_domain_result.rc == 0
+
+        - name: Configure SMB service VIPs
+          ansible.builtin.command:
+            cmd: "weka smb interface-group port add smb-group {{ item }}"
+          loop: "{{ weka_smb_vips }}"
+          register: smb_vip_result
+          failed_when: smb_vip_result.rc != 0 and 'already exists' not in smb_vip_result.stderr
+          changed_when: smb_vip_result.rc == 0
+
+    - name: Configure S3 service
+      when: weka_s3_enabled | bool
+      block:
+        - name: Enable S3 protocol
+          ansible.builtin.command:
+            cmd: "weka s3 cluster create --port {{ weka_s3_port }}"
+          register: s3_create_result
+          failed_when: s3_create_result.rc != 0 and 'already exists' not in s3_create_result.stderr
+          changed_when: s3_create_result.rc == 0
+
+        - name: Create S3 access credentials
+          ansible.builtin.command:
+            cmd: "weka s3 user create default --access-key {{ weka_s3_access_key }} --secret-key {{ weka_s3_secret_key }}"
+          register: s3_user_result
+          failed_when: s3_user_result.rc != 0 and 'already exists' not in s3_user_result.stderr
+          changed_when: s3_user_result.rc == 0
+          no_log: true  # Don't log sensitive credentials
+
+    - name: Create Weka filesystems
+      ansible.builtin.command:
+        cmd: "weka fs create {{ item.name }} {{ item.size }} --thin-provisioned={{ item.thin_provisioned }}"
+      loop: "{{ weka_filesystems }}"
+      register: fs_create_result
+      failed_when: fs_create_result.rc != 0 and 'already exists' not in fs_create_result.stderr
+      changed_when: fs_create_result.rc == 0
+      when: inventory_hostname == groups['weka'][0]  # Run on first node only
+
+    - name: Enable Prometheus monitoring
+      when: weka_monitoring_enabled | bool
+      block:
+        - name: Configure Prometheus exporter
+          ansible.builtin.command:
+            cmd: "weka debug manhole --command 'prometheus.enable()'"
+          register: prometheus_enable_result
+          changed_when: "'enabled' in prometheus_enable_result.stdout"
+
+    - name: Verify Weka cluster status
+      ansible.builtin.command:
+        cmd: weka status
+      register: cluster_status
+      changed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        var: cluster_status.stdout_lines
+
+  handlers:
+    - name: Restart networking
+      ansible.builtin.systemd:
+        name: networking
+        state: restarted
