@@ -167,12 +167,36 @@ Since Croit only supports keepalived (which provides VIP failover but not load b
 | **Learning curve** | Lower | Higher |
 | **Performance** | Excellent | Excellent (slightly higher throughput at extreme scale) |
 | **Maturity** | Modern, active development | Battle-tested, 20+ years |
+| **VIP Failover** | Requires keepalived | Requires keepalived |
 
 **Recommendation**: For this use case (3 RGW backends, moderate throughput), **Traefik is recommended** due to:
 - Single binary installation
 - YAML configuration
 - Automatic config reloading (no restart needed)
 - Built-in Let's Encrypt certificate management with automatic renewal
+
+### Keepalived: Required for Both Traefik and HAProxy
+
+**Important**: Neither Traefik nor HAProxy provides VIP (Virtual IP) failover - they are both **load balancers/reverse proxies only**. You need **keepalived** (or equivalent) regardless of which load balancer you choose.
+
+| Component | What It Does | Provided By |
+|-----------|--------------|-------------|
+| **Load Balancing** | Distributes requests across RGW backends | Traefik or HAProxy |
+| **Health Checks** | Detects unhealthy RGW daemons | Traefik or HAProxy |
+| **SSL Termination** | Handles HTTPS certificates | Traefik or HAProxy |
+| **VIP Failover** | Moves virtual IP if proxy node fails | **Keepalived** (required separately) |
+
+**Why keepalived is needed**:
+- Weka IO needs a **single stable IP address** to connect to
+- If you run 2-3 load balancer instances for HA, keepalived manages which one owns the VIP
+- If the active load balancer fails, keepalived moves the VIP to a backup instance within seconds
+
+**Alternatives to keepalived** (not applicable here):
+- **DNS round-robin**: Multiple A records - but clients cache DNS, slow failover
+- **Cloud load balancers**: AWS ALB/NLB, Azure LB - not available on-premises
+- **Kubernetes Services**: Built-in VIP handling - but we're using VMs, not K8s
+
+For on-premises Proxmox VMs, **keepalived + Traefik** (or keepalived + HAProxy) is the standard pattern.
 
 ### Solution 1: Traefik (Recommended)
 
