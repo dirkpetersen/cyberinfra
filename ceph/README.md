@@ -212,7 +212,9 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Traefik automatically looks for configuration in `/etc/traefik/traefik.yml` (no `--configFile` flag needed).
+Traefik uses a two-part configuration:
+1. **Static config** (`/etc/traefik/traefik.yml`): Defines entrypoints, providers, and certificate resolvers - loaded at startup
+2. **Dynamic config** (`/etc/traefik/conf.d/`): Defines routers, services, and middlewares - **watched for changes** (no restart needed)
 
 ```bash
 sudo systemctl daemon-reload
