@@ -204,13 +204,15 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml
+ExecStart=/usr/local/bin/traefik
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+Traefik automatically looks for configuration in `/etc/traefik/traefik.yml` (no `--configFile` flag needed).
 
 ```bash
 sudo systemctl daemon-reload
