@@ -35276,7 +35276,7 @@ For convenience, a summary of the available kernel templates and their requireme
 
 1 Docker image: *docker.io/brightcomputing/jupyter-kernel-sample:k8s-spark-3.5.3-py38-cuda12.6-rapids24.08-2* 2 Conda needs to be installed for the user, and the Conda environment needs to be configured in the user’s Bash shell as described in section 11.4.2 of the *User Manual*.
 
-DockerHub kernels page: <https://hub.docker.com/r/brightcomputing/jupyter-kernel-sample/tags>
+DockerHub kernels page: https://hub.docker.com/r/brightcomputing/jupyter-kernel-sample/tags
 
 **16.5.2 Jupyter Kernel Starter**
 
