@@ -557,6 +557,295 @@ spec:
 
 **Note**: This is documented for reference but **will not work with Croit Ceph**.
 
+## Multi-Datacenter Configuration (16 Nodes across 4 DCs)
+
+For geographically distributed Ceph clusters with RGW daemons in multiple datacenters, configure load balancing to ensure requests are distributed across all sites.
+
+### Architecture
+
+```
+                              ┌─────────────────────────────────┐
+                              │      Traefik / HAProxy          │
+                              │    (with keepalived VIP)        │
+                              │       VIP: 10.10.3.100          │
+                              └───────────────┬─────────────────┘
+                                              │
+            ┌─────────────────┬───────────────┼───────────────┬─────────────────┐
+            │                 │               │               │                 │
+            ▼                 ▼               ▼               ▼                 │
+   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+   │  Datacenter 1   │ │  Datacenter 2   │ │  Datacenter 3   │ │  Datacenter 4   │
+   │  (dc1)          │ │  (dc2)          │ │  (dc3)          │ │  (dc4)          │
+   │                 │ │                 │ │                 │ │                 │
+   │ rgw-dc1-n1:8080 │ │ rgw-dc2-n1:8080 │ │ rgw-dc3-n1:8080 │ │ rgw-dc4-n1:8080 │
+   │ rgw-dc1-n2:8080 │ │ rgw-dc2-n2:8080 │ │ rgw-dc3-n2:8080 │ │ rgw-dc4-n2:8080 │
+   │ rgw-dc1-n3:8080 │ │ rgw-dc2-n3:8080 │ │ rgw-dc3-n3:8080 │ │ rgw-dc4-n3:8080 │
+   │ rgw-dc1-n4:8080 │ │ rgw-dc2-n4:8080 │ │ rgw-dc3-n4:8080 │ │ rgw-dc4-n4:8080 │
+   │                 │ │                 │ │                 │ │                 │
+   │ 10.10.1.11-14   │ │ 10.10.2.11-14   │ │ 10.10.3.11-14   │ │ 10.10.4.11-14   │
+   └─────────────────┘ └─────────────────┘ └─────────────────┘ └─────────────────┘
+```
+
+### Traefik Multi-DC Configuration
+
+```yaml
+# /etc/traefik/conf.d/rgw-multi-dc.yml
+
+http:
+  routers:
+    rgw-s3:
+      rule: "Host(`s3.example.com`)"
+      entryPoints:
+        - websecure
+      service: rgw-all-dcs
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    # Combined service with all 16 RGW nodes across 4 datacenters
+    # Traefik round-robins across all healthy servers
+    rgw-all-dcs:
+      loadBalancer:
+        healthCheck:
+          path: /swift/healthcheck
+          interval: 10s
+          timeout: 3s
+        servers:
+          # Datacenter 1
+          - url: "http://10.10.1.11:8080"
+          - url: "http://10.10.1.12:8080"
+          - url: "http://10.10.1.13:8080"
+          - url: "http://10.10.1.14:8080"
+          # Datacenter 2
+          - url: "http://10.10.2.11:8080"
+          - url: "http://10.10.2.12:8080"
+          - url: "http://10.10.2.13:8080"
+          - url: "http://10.10.2.14:8080"
+          # Datacenter 3
+          - url: "http://10.10.3.11:8080"
+          - url: "http://10.10.3.12:8080"
+          - url: "http://10.10.3.13:8080"
+          - url: "http://10.10.3.14:8080"
+          # Datacenter 4
+          - url: "http://10.10.4.11:8080"
+          - url: "http://10.10.4.12:8080"
+          - url: "http://10.10.4.13:8080"
+          - url: "http://10.10.4.14:8080"
+```
+
+### HAProxy Multi-DC Configuration
+
+HAProxy provides more control over multi-datacenter distribution using **backup servers** and **agent checks**.
+
+```haproxy
+# /etc/haproxy/haproxy.cfg
+
+global
+    log /dev/log local0
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    maxconn 8192
+
+    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    option  redispatch
+    option  forwardfor
+    retries 3
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+    timeout http-request 10s
+    timeout http-keep-alive 30s
+
+# Stats page for monitoring
+listen stats
+    bind *:9000
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats admin if LOCALHOST
+
+# RGW S3 Frontend (HTTPS)
+frontend rgw_s3_https
+    bind *:443 ssl crt /etc/haproxy/certs/rgw.pem
+    mode http
+    default_backend rgw_all_datacenters
+
+    http-request set-header X-Forwarded-Proto https
+    http-request set-header X-Forwarded-Port 443
+
+# Multi-DC Backend: All 16 RGW nodes across 4 datacenters
+# Round-robin ensures even distribution; health checks remove failed nodes
+backend rgw_all_datacenters
+    mode http
+    balance roundrobin
+    option httpchk GET /swift/healthcheck
+    http-check expect status 200
+
+    # Datacenter 1 (10.10.1.x)
+    server rgw-dc1-n1 10.10.1.11:8080 check inter 3s fall 3 rise 2
+    server rgw-dc1-n2 10.10.1.12:8080 check inter 3s fall 3 rise 2
+    server rgw-dc1-n3 10.10.1.13:8080 check inter 3s fall 3 rise 2
+    server rgw-dc1-n4 10.10.1.14:8080 check inter 3s fall 3 rise 2
+
+    # Datacenter 2 (10.10.2.x)
+    server rgw-dc2-n1 10.10.2.11:8080 check inter 3s fall 3 rise 2
+    server rgw-dc2-n2 10.10.2.12:8080 check inter 3s fall 3 rise 2
+    server rgw-dc2-n3 10.10.2.13:8080 check inter 3s fall 3 rise 2
+    server rgw-dc2-n4 10.10.2.14:8080 check inter 3s fall 3 rise 2
+
+    # Datacenter 3 (10.10.3.x)
+    server rgw-dc3-n1 10.10.3.11:8080 check inter 3s fall 3 rise 2
+    server rgw-dc3-n2 10.10.3.12:8080 check inter 3s fall 3 rise 2
+    server rgw-dc3-n3 10.10.3.13:8080 check inter 3s fall 3 rise 2
+    server rgw-dc3-n4 10.10.3.14:8080 check inter 3s fall 3 rise 2
+
+    # Datacenter 4 (10.10.4.x)
+    server rgw-dc4-n1 10.10.4.11:8080 check inter 3s fall 3 rise 2
+    server rgw-dc4-n2 10.10.4.12:8080 check inter 3s fall 3 rise 2
+    server rgw-dc4-n3 10.10.4.13:8080 check inter 3s fall 3 rise 2
+    server rgw-dc4-n4 10.10.4.14:8080 check inter 3s fall 3 rise 2
+```
+
+### Ensuring Distribution Across All Datacenters
+
+Both configurations above use **round-robin** across all 16 servers. This naturally distributes requests across all 4 datacenters as long as servers are healthy.
+
+**Key behaviors:**
+- Health checks remove failed nodes automatically
+- If an entire datacenter fails (4 nodes), traffic flows to remaining 12 nodes in 3 DCs
+- Round-robin ensures no single DC gets overloaded
+
+**For guaranteed DC distribution** (at least one request per DC), you would need application-level logic or a more complex setup:
+
+#### HAProxy with DC-Aware Weighting
+
+```haproxy
+# Alternative: Use weights to ensure DC distribution
+# Higher weight = more requests to that server
+backend rgw_dc_weighted
+    mode http
+    balance roundrobin
+    option httpchk GET /swift/healthcheck
+    http-check expect status 200
+
+    # One "primary" server per DC with higher weight
+    # Ensures at least one server per DC gets traffic
+    server rgw-dc1-n1 10.10.1.11:8080 weight 100 check inter 3s fall 3 rise 2
+    server rgw-dc1-n2 10.10.1.12:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc1-n3 10.10.1.13:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc1-n4 10.10.1.14:8080 weight 25 check inter 3s fall 3 rise 2
+
+    server rgw-dc2-n1 10.10.2.11:8080 weight 100 check inter 3s fall 3 rise 2
+    server rgw-dc2-n2 10.10.2.12:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc2-n3 10.10.2.13:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc2-n4 10.10.2.14:8080 weight 25 check inter 3s fall 3 rise 2
+
+    server rgw-dc3-n1 10.10.3.11:8080 weight 100 check inter 3s fall 3 rise 2
+    server rgw-dc3-n2 10.10.3.12:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc3-n3 10.10.3.13:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc3-n4 10.10.3.14:8080 weight 25 check inter 3s fall 3 rise 2
+
+    server rgw-dc4-n1 10.10.4.11:8080 weight 100 check inter 3s fall 3 rise 2
+    server rgw-dc4-n2 10.10.4.12:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc4-n3 10.10.4.13:8080 weight 25 check inter 3s fall 3 rise 2
+    server rgw-dc4-n4 10.10.4.14:8080 weight 25 check inter 3s fall 3 rise 2
+```
+
+#### Traefik with Weighted Round Robin
+
+```yaml
+# /etc/traefik/conf.d/rgw-multi-dc-weighted.yml
+
+http:
+  routers:
+    rgw-s3:
+      rule: "Host(`s3.example.com`)"
+      entryPoints:
+        - websecure
+      service: rgw-weighted
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    rgw-weighted:
+      weighted:
+        services:
+          - name: rgw-dc1
+            weight: 25
+          - name: rgw-dc2
+            weight: 25
+          - name: rgw-dc3
+            weight: 25
+          - name: rgw-dc4
+            weight: 25
+
+    # Per-datacenter services
+    rgw-dc1:
+      loadBalancer:
+        healthCheck:
+          path: /swift/healthcheck
+          interval: 10s
+          timeout: 3s
+        servers:
+          - url: "http://10.10.1.11:8080"
+          - url: "http://10.10.1.12:8080"
+          - url: "http://10.10.1.13:8080"
+          - url: "http://10.10.1.14:8080"
+
+    rgw-dc2:
+      loadBalancer:
+        healthCheck:
+          path: /swift/healthcheck
+          interval: 10s
+          timeout: 3s
+        servers:
+          - url: "http://10.10.2.11:8080"
+          - url: "http://10.10.2.12:8080"
+          - url: "http://10.10.2.13:8080"
+          - url: "http://10.10.2.14:8080"
+
+    rgw-dc3:
+      loadBalancer:
+        healthCheck:
+          path: /swift/healthcheck
+          interval: 10s
+          timeout: 3s
+        servers:
+          - url: "http://10.10.3.11:8080"
+          - url: "http://10.10.3.12:8080"
+          - url: "http://10.10.3.13:8080"
+          - url: "http://10.10.3.14:8080"
+
+    rgw-dc4:
+      loadBalancer:
+        healthCheck:
+          path: /swift/healthcheck
+          interval: 10s
+          timeout: 3s
+        servers:
+          - url: "http://10.10.4.11:8080"
+          - url: "http://10.10.4.12:8080"
+          - url: "http://10.10.4.13:8080"
+          - url: "http://10.10.4.14:8080"
+```
+
+This weighted configuration ensures:
+- Each datacenter receives 25% of traffic
+- Within each DC, requests are load-balanced across 4 nodes
+- If one DC fails, its 25% is redistributed to remaining DCs
+
 ## Recommended Architecture for Weka + Croit Ceph
 
 Given Croit's limitations, we recommend:
