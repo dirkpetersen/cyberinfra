@@ -20,7 +20,7 @@ This repository contains Ansible automation for managing a heterogeneous cyber i
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/cyberinfra.git
+git clone https://github.com/dirkpetersen/cyberinfra.git
 cd cyberinfra
 
 # Install Python dependencies
