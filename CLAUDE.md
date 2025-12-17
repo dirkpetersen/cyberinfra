@@ -10,15 +10,18 @@ This repository documents and tracks the design, planning, and deployment of a *
 - **Ceph**: Distributed block/object storage integrated with Proxmox
 - **NVIDIA HPC**: GPU compute infrastructure (future)
 
-## Architecture Pattern: Hybrid Cloud IaC with AWS SSM Runtime Injection
+## Architecture Pattern: Manual Execution with AD Authentication and Audit Trail
 
-The core design philosophy separates **generic automation logic** (stored in public GitHub) from **site-specific topology and secrets** (stored in AWS Systems Manager Parameter Store).
+The core design philosophy separates **generic automation logic** (stored in public GitHub) from **site-specific topology and secrets** (stored in AWS Systems Manager Parameter Store), with **manual execution** by authenticated administrators.
 
 ### Key Principles
-1. **Public Repository**: Contains Ansible playbooks, deployment documentation, and architecture guides
+1. **Public Repository**: Contains automation playbooks, deployment documentation, and architecture guides
 2. **AWS SSM Parameter Store**: Stores all IP addresses, MAC addresses, hostnames, credentials, and secrets
-3. **Dynamic Runtime Assembly**: Self-hosted runner queries AWS at execution time to build inventory
-4. **Path-Based Hierarchy**: SSM parameters follow pattern `/{system_type}/{cluster_id}/{node_id}/{attribute}`
+3. **Manual Execution**: Administrators run tug commands on-demand from a centralized Tugboat node (no automated triggers)
+4. **AD Authentication + MFA**: All access requires Active Directory credentials with Duo two-factor authentication
+5. **Role-Based Service Accounts**: Team-specific local accounts protected by AD group membership
+6. **Complete Audit Trail**: All actions logged and attributed to individual users, forwarded to Azure Log Analytics
+7. **Path-Based Hierarchy**: SSM parameters follow pattern `/{system_type}/{cluster_id}/{node_id}/{attribute}`
 
 ## Repository Structure
 
@@ -27,8 +30,11 @@ The core design philosophy separates **generic automation logic** (stored in pub
 ├── README.md              # High-level architecture and design patterns
 ├── LICENSE                # MIT License
 ├── ansible.cfg            # Ansible configuration (SSH transport for on-prem)
-├── .github/workflows/     # GitHub Actions automation
-│   └── deploy.yml         # Automated deployment workflow
+├── docs/                  # Tugboat operations documentation
+│   ├── tugboat-admin-guide.md      # Administrator guide for Tugboat operations
+│   ├── tugboat-access-control.md   # AD integration and role-based access
+│   ├── tugboat-audit-compliance.md # Audit trail and compliance
+│   └── tugboat-node-setup.md    # Management VM configuration
 ├── inventory/             # Dynamic inventory for Ansible
 │   └── ssm_plugin.py      # Queries AWS SSM to build inventory at runtime
 ├── group_vars/            # Ansible group variables
@@ -36,7 +42,7 @@ The core design philosophy separates **generic automation logic** (stored in pub
 │   ├── weka.yml           # Variables for all Weka nodes
 │   ├── ceph.yml           # Variables for all Ceph nodes
 │   └── nvidia.yml         # Variables for all NVIDIA HPC nodes
-├── playbooks/             # Ansible automation playbooks
+├── playbooks/             # Tugboat automation playbooks
 │   ├── setup_proxmox.yml  # Configure Proxmox VE cluster
 │   ├── setup_weka.yml     # Configure Weka file system
 │   ├── setup_ceph.yml     # Configure Ceph storage
@@ -101,7 +107,7 @@ The `tests/example/` directory contains a **working demonstration** of the Hybri
 ```bash
 cd tests/example
 ./launch-instance.sh           # Launch test instance
-ansible-playbook -i inventory.aws_ec2.yml change-hostname.yml  # Run playbook
+tug deploy -i inventory.aws_ec2.yml change-hostname.yml  # Run playbook
 ./cleanup.sh                   # Clean up resources
 ```
 
@@ -112,28 +118,83 @@ This example is a simplified version of the production automation pattern, desig
 ### High-Level Architecture Diagram
 
 ```text
-[ Public GitHub ]                        [ AWS Cloud (US-West-2) ]
-(Code Repository)                        (Parameter Store / Secrets)
-       |                                          |
-       | (1. Webhook Trigger)                     | (3. API Fetch Data)
-       v                                          v
-[ ON-PREM ZONE ] <--------------------------------+
-|
-|  +---------------------------+
-|  | Management Node           |
-|  | (Self-Hosted Runner)      |
-|  | Runs: Ansible + Boto3     |
-|  +---------------------------+
-|             |
-|             | (4. Configure via SSH/API)
-|             v
-|   +---------------------+---------------------+---------------------+
-|   |                     |                     |                     |
-v   v                     v                     v                     v
-[ PROXMOX ]           [ WEKA IO ]           [ CEPH ]             [ NVIDIA ]
-(Cluster: cl1)        (Cluster: cl1)        (Cluster: cl1)       (Cluster: nvl1)
-Nodes: n01, n02...    Nodes: n01...         Nodes: n02...        Nodes: n01...
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SYSADMIN WORKSTATION                           │
+│                         (Corporate network / VPN)                           │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  │ SSH with AD credentials + Duo MFA
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           MANAGEMENT NODE (VM)                              │
+│                         tugboat.domain.local                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Authentication:  AD (SSSD/Realm) + Duo MFA                                 │
+│  Service Accounts: svc-proxmox, svc-weka, svc-ceph, svc-nvidia              │
+│  Access Control:  PAM validates AD group membership for su to svc-*        │
+│  Execution:       tug wrapper fetches SSM + runs playbooks       │
+│  Audit:           JSON logs → Syslog → Azure Log Analytics → Defender XDR  │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+        ┌─────────────────────────┼───────────────────────┐
+        │ SSH (key-based)         │                       │
+        ▼                         ▼                       ▼
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│   Proxmox    │         │    Weka      │         │   NVIDIA     │
+│   Cluster    │         │   Cluster    │         │    HPC       │
+└──────────────┘         └──────────────┘         └──────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           AWS CLOUD (US-West-2)                             │
+│                                                                             │
+│   SSM Parameter Store: /{system_type}/{cluster_id}/{node_id}/{attribute}   │
+│   - IPs, MACs, credentials (SecureString), configuration data              │
+│   - Fetched at runtime by tug wrapper                            │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Access Control Model
+
+```text
+AD User authenticates via SSH + Duo MFA
+              │
+              ▼
+     ┌────────────────────┐
+     │ Personal AD Shell  │
+     │ jsmith@DOMAIN.LOCAL│
+     └────────┬───────────┘
+              │
+              │ su - svc-proxmox
+              ▼
+     ┌────────────────────┐     ┌─────────────────────────┐
+     │ PAM checks AD      │────▶│ Is user in              │
+     │ group membership   │     │ Proxmox-Admins@DOMAIN?  │
+     └────────────────────┘     └────────────┬────────────┘
+                                             │
+                        ┌────────────────────┴────────────────────┐
+                        │                                        │
+                   ┌────▼────┐                              ┌────▼────┐
+                   │   YES   │                              │   NO    │
+                   │ Allow   │                              │ Deny    │
+                   └────┬────┘                              └─────────┘
+                        │
+                        ▼
+              ┌─────────────────────┐
+              │ svc-proxmox shell   │
+              │ Run: tug  │
+              └─────────────────────┘
+```
+
+**Service Accounts and Required AD Groups:**
+
+| Service Account | AD Group Required | Infrastructure Access |
+|-----------------|-------------------|----------------------|
+| `svc-proxmox` | `Proxmox-Admins@DOMAIN.LOCAL` | Proxmox VE clusters |
+| `svc-weka` | `Weka-Admins@DOMAIN.LOCAL` | Weka file systems |
+| `svc-ceph` | `Ceph-Admins@DOMAIN.LOCAL` | Ceph storage clusters |
+| `svc-nvidia` | `NVIDIA-Admins@DOMAIN.LOCAL` | NVIDIA HPC infrastructure |
+
+Members of `Infrastructure-Admins@DOMAIN.LOCAL` can access all service accounts.
 
 ### Dynamic Inventory Logic
 
@@ -173,13 +234,14 @@ When the script runs, it recursively fetches paths and builds a JSON inventory i
 
 1. **Provision Hardware**: Rack physical servers for the new cluster
 2. **Update AWS SSM**: Administrator adds parameters under `/{system_type}/{cluster_id}/{node_id}/...`
-3. **Push Code**: Administrator pushes update to GitHub (or manually triggers workflow)
-4. **Run Automation**:
-   - Runner queries AWS SSM: "What exists under /{system_type}?"
-   - AWS replies with cluster and node information
-   - Runner detects new nodes and executes appropriate playbooks
-   - Runner connects via SSH to configure systems
-5. **Success**: System configured. Code remains public; Secrets remain private.
+3. **Authenticate**: Sysadmin SSHs to Tugboat node with AD credentials + Duo MFA
+4. **Switch Account**: Sysadmin runs `su - svc-proxmox` (or appropriate service account)
+5. **Execute Playbook**: Sysadmin runs `tug setup_proxmox --check` then `tug setup_proxmox`
+6. **Runtime Injection**: Wrapper fetches SSM parameters and builds dynamic inventory
+7. **Configuration**: Ansible connects via SSH to configure target systems
+8. **Audit**: All actions logged with user attribution, forwarded to Azure Log Analytics
+
+**No automated triggers**: Changes to GitHub or SSM do not automatically trigger execution. All automation is manually initiated by authenticated administrators.
 
 ## AWS Systems Manager (SSM) Parameter Schema
 
@@ -253,11 +315,13 @@ All infrastructure parameters follow a consistent hierarchy:
 5. **Add to monitoring**: Include in observability and health check procedures
 
 ### Working with Ansible Automation
-- **Playbooks**: Will be stored in this repository (public GitHub)
+- **Playbooks**: Stored in this repository (public GitHub)
 - **Inventory**: Generated dynamically by querying AWS SSM at runtime
 - **Variables**: Group vars for system types, host vars from SSM parameters
 - **Secrets**: NEVER commit secrets - always use `aws_ssm` lookup plugin
-- **Control node**: Ansible runs from pve1-node1 (Proxmox cluster)
+- **Tugboat Node**: Dedicated VM (`tugboat.domain.local`) with AD authentication
+- **Execution**: Use `tug` wrapper script (not raw tug deploy)
+- **Documentation**: See `docs/tugboat-admin-guide.md` for complete operations guide
 
 ## Network Architecture
 
@@ -276,11 +340,13 @@ All infrastructure parameters follow a consistent hierarchy:
 ## Security Considerations
 
 ### Authentication & Secrets
-- **SSH Keys**: ED25519 for Ansible, RSA 4096 for admin access
+- **Tugboat Node Access**: AD authentication (SSSD/Realm) with Duo MFA required
+- **Service Account Access**: PAM validates AD group membership before allowing `su` to svc-* accounts
+- **SSH Keys**: ED25519 for Tugboat automation, per-team service account keys
 - **Passwords**: All stored in AWS SSM as SecureString type
 - **API Tokens**: Stored in SSM under `/shared/` paths
-- **Active Directory**: Integration details in SSM
-- **Two-Factor Auth**: Duo integration for Proxmox web UI
+- **Emergency Access**: Root password stored in Keeper (break-glass procedure documented)
+- **Two-Factor Auth**: Duo integration for Tugboat node SSH and Proxmox web UI
 
 ### Network Isolation
 - **Host OS network**: vlan6 - sysadmin access only
@@ -332,9 +398,23 @@ All infrastructure parameters follow a consistent hierarchy:
 
 ## Security & Identity Management
 
-### Runner IAM Policy
+### AD Groups and Service Accounts
 
-The Self-Hosted Runner (or GitHub Actions runner) requires an IAM Policy granting read access to the SSM parameter hierarchy:
+**Required AD Security Groups:**
+
+| AD Group | Purpose |
+|----------|---------|
+| `Proxmox-Admins@DOMAIN.LOCAL` | Access to svc-proxmox service account |
+| `Weka-Admins@DOMAIN.LOCAL` | Access to svc-weka service account |
+| `Ceph-Admins@DOMAIN.LOCAL` | Access to svc-ceph service account |
+| `NVIDIA-Admins@DOMAIN.LOCAL` | Access to svc-nvidia service account |
+| `Infrastructure-Admins@DOMAIN.LOCAL` | Superadmin access to all service accounts |
+
+### Service Account IAM Policies
+
+Each service account has an IAM user with access limited to its infrastructure type:
+
+**Example: svc-proxmox IAM policy:**
 
 ```json
 {
@@ -347,27 +427,37 @@ The Self-Hosted Runner (or GitHub Actions runner) requires an IAM Policy grantin
                 "ssm:GetParameters",
                 "ssm:GetParametersByPath"
             ],
-            "Resource": [
-                "arn:aws:ssm:us-west-2:123456789012:parameter/proxmox/*",
-                "arn:aws:ssm:us-west-2:123456789012:parameter/weka/*",
-                "arn:aws:ssm:us-west-2:123456789012:parameter/ceph/*",
-                "arn:aws:ssm:us-west-2:123456789012:parameter/nvidia/*"
-            ]
+            "Resource": "arn:aws:ssm:us-west-2:*:parameter/proxmox/*"
         },
         {
             "Effect": "Allow",
             "Action": "kms:Decrypt",
-            "Resource": "arn:aws:kms:us-west-2:123456789012:key/alias/ssm-secrets"
+            "Resource": "arn:aws:kms:us-west-2:*:key/alias/aws/ssm"
         }
     ]
 }
 ```
 
+### Audit Trail
+
+All Ansible executions are logged with:
+- **User attribution**: AD principal who initiated the action
+- **Service account**: Which svc-* account was used
+- **Execution details**: Playbook, arguments, target hosts
+- **Results**: Success/failure, exit code, duration
+
+**Log destinations:**
+- Local: `/var/log/tugboat/` (90-day retention)
+- Cloud: Azure Log Analytics (1-year retention)
+- SIEM: Microsoft Defender XDR (alerting and correlation)
+
+See `docs/tugboat-audit-compliance.md` for complete audit documentation.
+
 ### Network Flow
 
-1. **Outbound**: Runner initiates connection to AWS API (HTTPS port 443)
-2. **Inbound**: No inbound ports opened on firewall
-3. **Internal**: Runner connects to infrastructure nodes via:
+1. **Outbound**: Management node initiates connection to AWS API (HTTPS port 443)
+2. **Inbound**: SSH (port 22) from corporate network to Tugboat node
+3. **Internal**: Management node connects to infrastructure nodes via:
    - SSH (port 22) for host configuration
    - Proxmox API (port 8006) for cluster management
    - Weka API (port 14000) for cluster management
@@ -376,9 +466,20 @@ The Self-Hosted Runner (or GitHub Actions runner) requires an IAM Policy grantin
 
 1. **Never commit secrets**: Use AWS SSM Parameter Store exclusively
 2. **Follow SSM hierarchy**: Maintain consistency in parameter paths
-3. **Document IP allocations**: Even placeholders help during planning
-4. **Test incrementally**: Validate each phase before proceeding
-5. **Reference hardware specs**: Always check BOM files for exact part numbers
-6. **Cross-reference docs**: Keep Proxmox, Weka, and root-level docs synchronized
-7. **Include rollback procedures**: Document how to undo changes safely
-8. **Plan for monitoring**: Add observability from the start, not as afterthought
+3. **Use tug wrapper**: Never run raw tug deploy; always use the audited wrapper
+4. **Always run --check first**: Preview changes before applying to production
+5. **Document IP allocations**: Even placeholders help during planning
+6. **Test incrementally**: Validate each phase before proceeding
+7. **Reference hardware specs**: Always check BOM files for exact part numbers
+8. **Cross-reference docs**: Keep Proxmox, Weka, and root-level docs synchronized
+9. **Include rollback procedures**: Document how to undo changes safely
+10. **Plan for monitoring**: Add observability from the start, not as afterthought
+
+## Ansible Operations Documentation
+
+For day-to-day Tugboat operations, see the documentation in `docs/`:
+
+- **[docs/tugboat-admin-guide.md](docs/tugboat-admin-guide.md)**: How to execute Tugboat automation
+- **[docs/tugboat-access-control.md](docs/tugboat-access-control.md)**: AD groups, service accounts, PAM configuration
+- **[docs/tugboat-audit-compliance.md](docs/tugboat-audit-compliance.md)**: Audit trail, log retention, compliance
+- **[docs/tugboat-node-setup.md](docs/tugboat-node-setup.md)**: Management VM setup and configuration

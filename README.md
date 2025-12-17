@@ -1,72 +1,72 @@
 # Cyber Infrastructure Automation
 
-**Version:** 2.0
-**Pattern:** Hybrid Cloud IaC with AWS SSM Runtime Injection
+**Version:** 2.1
+**Pattern:** Manual Execution with AD Authentication and Audit Trail
 **Infrastructure:** Proxmox VE, Weka, Ceph, NVIDIA HPC
 
-This repository contains Ansible automation for managing a heterogeneous cyber infrastructure including virtualization (Proxmox VE), high-performance storage (Weka, Ceph), and AI/HPC compute (NVIDIA).
+This repository contains Tugboat automation for managing a heterogeneous cyber infrastructure including virtualization (Proxmox VE), high-performance storage (Weka, Ceph), and AI/HPC compute (NVIDIA).
 
-## 🎯 Quick Start
+**Execution Model:** Administrators manually run tug commands from a centralized Tugboat node after authenticating via Active Directory with Duo MFA. All actions are logged and attributed to individual users.
+
+## Quick Start
 
 ### Prerequisites
 
-- **Python 3.11+** with pip
-- **Ansible 2.12+**
-- **AWS CLI** configured with credentials
-- **SSH access** to infrastructure nodes
-- **AWS SSM Parameter Store** populated with infrastructure data
+- **AD Account**: Member of appropriate infrastructure admin group (e.g., `Proxmox-Admins@DOMAIN.LOCAL`)
+- **Duo MFA**: Configured for your AD account
+- **Network Access**: SSH connectivity to Tugboat node (`tugboat.domain.local`)
 
-### Installation
+### Connect to Tugboat Node
 
 ```bash
-# Clone repository
-git clone https://github.com/dirkpetersen/cyberinfra.git
-cd cyberinfra
-
-# Install Python dependencies
-pip install ansible boto3 botocore
-
-# Install Ansible collections
-ansible-galaxy collection install amazon.aws community.general
-
-# Configure AWS credentials
-aws configure
-# AWS Access Key ID: <your-key>
-# AWS Secret Access Key: <your-secret>
-# Default region: us-west-2
+# SSH with AD credentials (Duo MFA will prompt)
+ssh jsmith@DOMAIN.LOCAL@tugboat.domain.local
 ```
 
-### Test Dynamic Inventory
+### Switch to Service Account
 
 ```bash
-# List all discovered hosts from AWS SSM
-python3 inventory/ssm_plugin.py --list
-
-# Get variables for a specific host
-python3 inventory/ssm_plugin.py --host n01
-
-# Test with Ansible
-ansible-inventory -i inventory/ssm_plugin.py --list
-ansible-inventory -i inventory/ssm_plugin.py --graph
+# Switch to team service account (PAM verifies AD group membership)
+su - svc-proxmox      # For Proxmox administration
+su - svc-weka         # For Weka administration
+su - svc-ceph         # For Ceph administration
+su - svc-nvidia       # For NVIDIA HPC administration
 ```
 
-### Run a Playbook
+### Run Tugboat Automation
 
 ```bash
-# Syntax check
-ansible-playbook --syntax-check playbooks/setup_proxmox.yml
+# Always run check mode first
+tug setup_proxmox --check
 
-# Dry run (check mode)
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --check --diff
+# List hosts that would be affected
+tug setup_proxmox --list-hosts
 
-# Execute playbook
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml -v
+# Execute playbook (requires confirmation)
+tug setup_proxmox
 
-# Execute with limit (single host)
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit n01
+# Limit to specific cluster or host
+tug setup_proxmox --limit cl1
+tug setup_weka --limit n01
+
+# Run specific tags
+tug setup_proxmox --tags network
+
+# Increase verbosity
+tug setup_proxmox -vv
 ```
 
-## 📁 Repository Structure
+### View Execution Logs
+
+```bash
+# View recent audit entries
+tail -20 /var/log/tugboat/executions.log | jq .
+
+# View full output for specific execution
+cat /var/log/tugboat/ansible-<execution-id>.log
+```
+
+## Repository Structure
 
 ```
 .
@@ -75,8 +75,11 @@ ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit 
 ├── LICENSE                    # MIT License
 ├── ansible.cfg                # Ansible configuration (SSH transport)
 │
-├── .github/workflows/         # GitHub Actions automation
-│   └── deploy.yml             # Automated deployment workflow
+├── docs/                      # Tugboat operations documentation
+│   ├── tugboat-admin-guide.md      # How to execute Tugboat automation
+│   ├── tugboat-access-control.md   # AD groups, service accounts, PAM
+│   ├── tugboat-audit-compliance.md # Audit trail, log retention, compliance
+│   └── tugboat-node-setup.md    # Management VM configuration
 │
 ├── inventory/                 # Dynamic inventory for Ansible
 │   └── ssm_plugin.py          # Queries AWS SSM to build inventory at runtime
@@ -87,7 +90,7 @@ ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit 
 │   ├── ceph.yml               # Variables for all Ceph nodes
 │   └── nvidia.yml             # Variables for all NVIDIA HPC nodes
 │
-├── playbooks/                 # Ansible automation playbooks
+├── playbooks/                 # Tugboat automation playbooks
 │   ├── setup_proxmox.yml      # Configure Proxmox VE cluster
 │   ├── setup_weka.yml         # Configure Weka file system
 │   ├── setup_ceph.yml         # Configure Ceph storage
@@ -107,13 +110,13 @@ ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit 
 │
 └── tests/                     # Test examples and demonstrations
     └── example/               # AWS EC2 test demonstrating SSM + Ansible pattern
-        ├── README.md          # Complete walkthrough of the example
+        ├── README.md          # Complete walkthrough
         ├── launch-instance.sh
         ├── cleanup.sh
         └── change-hostname.yml
 ```
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ### Core Design Principles
 
@@ -122,17 +125,22 @@ ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit 
    - **Data** (IPs, credentials, configuration): AWS SSM Parameter Store
    - **Result**: No secrets in version control
 
-2. **Dynamic Discovery at Runtime**
-   - Inventory is generated dynamically by querying AWS SSM
-   - No hardcoded IP addresses or hostnames in code
-   - Infrastructure changes reflected automatically
+2. **Manual Execution with Authentication**
+   - Administrators manually initiate all automation
+   - No automated triggers from GitHub or SSM changes
+   - AD authentication + Duo MFA required
 
-3. **SSH-Based Transport**
-   - Traditional SSH with key-based authentication for on-premises servers
-   - SSH keys stored securely in AWS SSM (retrieved at runtime)
-   - Direct network connectivity to infrastructure
+3. **Role-Based Access Control**
+   - Team-specific service accounts (svc-proxmox, svc-weka, etc.)
+   - PAM validates AD group membership before granting access
+   - Not all team members have access to all infrastructure
 
-4. **Infrastructure as Code**
+4. **Complete Audit Trail**
+   - All actions logged with user attribution
+   - Logs forwarded to Azure Log Analytics
+   - Integration with Microsoft Defender XDR for alerting
+
+5. **Infrastructure as Code**
    - Declarative configuration (describe desired state)
    - Idempotent operations (safe to run multiple times)
    - Version controlled and peer-reviewed
@@ -140,29 +148,33 @@ ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit 
 ### How It Works
 
 ```text
-┌─────────────────┐              ┌─────────────────────┐
-│  Public GitHub  │              │   AWS Cloud         │
-│  (This Repo)    │              │   (SSM Parameters)  │
-└────────┬────────┘              └──────────┬──────────┘
-         │                                   │
-         │ 1. Pull code                      │ 3. Query parameters
-         │                                   │
-         └──────────────┐       ┌────────────┘
-                        │       │
-                   ┌────▼───────▼────┐
-                   │  Self-Hosted    │
-                   │  Runner/Admin   │
-                   │  Workstation    │
-                   └────────┬─────────┘
-                            │
-                            │ 4. SSH to configure
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-   ┌────▼─────┐      ┌─────▼──────┐     ┌─────▼──────┐
-   │ Proxmox  │      │    Weka    │     │   NVIDIA   │
-   │ Cluster  │      │  Cluster   │     │    HPC     │
-   └──────────┘      └────────────┘     └────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SYSADMIN WORKSTATION                           │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  │ 1. SSH with AD + Duo MFA
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           MANAGEMENT NODE (VM)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  2. su - svc-proxmox (PAM checks AD group: Proxmox-Admins)                  │
+│  3. tug setup_proxmox --check                                     │
+│     └── Fetches SSM parameters, builds inventory, runs playbook            │
+│  4. All actions logged → Azure Log Analytics → Defender XDR                 │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+        ┌─────────────────────────┼─────────────────────────┐
+        │ 5. SSH (key-based)      │                         │
+        ▼                         ▼                         ▼
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│   Proxmox    │         │    Weka      │         │   NVIDIA     │
+│   Cluster    │         │   Cluster    │         │    HPC       │
+└──────────────┘         └──────────────┘         └──────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           AWS CLOUD (US-West-2)                             │
+│   SSM Parameter Store: IPs, credentials, configuration (fetched at runtime)│
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 🔑 AWS SSM Parameter Hierarchy
@@ -232,7 +244,7 @@ aws ssm put-parameter \
   --name /proxmox/cl1/shared/ssh_private_key \
   --value "$(cat ~/.ssh/id_ed25519)" \
   --type SecureString \
-  --description "SSH private key for Ansible automation"
+  --description "SSH private key for Tugboat automation"
 
 # List all parameters
 aws ssm get-parameters-by-path \
@@ -279,49 +291,59 @@ The automation runner (GitHub Actions or local workstation) requires the followi
 
 ### SSH Key Management
 
-- **Ansible automation**: ED25519 keys (modern, fast, secure)
+- **Tugboat automation**: ED25519 keys (modern, fast, secure)
 - **Admin access**: RSA 4096 keys (broad compatibility)
 - **Storage**: AWS SSM Parameter Store as SecureString
 - **Password authentication**: Disabled on all infrastructure
 
-## 🚀 Deployment Workflows
+## Deployment Workflows
 
-### Manual Execution
+### Authenticated Manual Execution
 
+All deployments are executed manually by authenticated administrators from the Tugboat node.
+
+**Step 1: Authenticate**
 ```bash
-# Deploy Proxmox cluster
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml
-
-# Deploy Weka cluster
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_weka.yml
-
-# Deploy Ceph storage
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_ceph.yml
-
-# Deploy NVIDIA HPC infrastructure
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_nvidia.yml
+# SSH to Tugboat node with AD credentials
+ssh jsmith@DOMAIN.LOCAL@tugboat.domain.local
+# Complete Duo MFA prompt
 ```
 
-### GitHub Actions (Automated)
+**Step 2: Switch to Service Account**
+```bash
+# Switch to appropriate team account (PAM validates AD group)
+su - svc-proxmox    # Requires membership in Proxmox-Admins@DOMAIN.LOCAL
+```
 
-The repository includes a GitHub Actions workflow (`.github/workflows/deploy.yml`) for automated deployment:
+**Step 3: Execute Playbook**
+```bash
+# Always run check mode first
+tug setup_proxmox --check
 
-**Manual Trigger:**
-1. Go to **Actions** tab in GitHub
-2. Select **Deploy Infrastructure** workflow
-3. Click **Run workflow**
-4. Choose target infrastructure (proxmox, weka, ceph, nvidia, or all)
-5. Enable/disable dry run mode
+# Execute with confirmation
+tug setup_proxmox
 
-**Automatic Trigger:**
-- Pushes to `main` branch that modify playbooks, group_vars, or inventory
-- Pull requests (runs in check mode only)
+# Available playbooks:
+tug setup_proxmox    # Proxmox VE cluster
+tug setup_weka       # Weka file system
+tug setup_ceph       # Ceph storage
+tug setup_nvidia     # NVIDIA HPC
+```
 
-**Requirements:**
-- Self-hosted GitHub Actions runner with network access to infrastructure
-- GitHub repository secrets configured:
-  - `AWS_ACCESS_KEY_ID`
-  - `AWS_SECRET_ACCESS_KEY`
+### Access Requirements
+
+| Infrastructure | Service Account | Required AD Group |
+|----------------|-----------------|-------------------|
+| Proxmox | `svc-proxmox` | `Proxmox-Admins@DOMAIN.LOCAL` |
+| Weka | `svc-weka` | `Weka-Admins@DOMAIN.LOCAL` |
+| Ceph | `svc-ceph` | `Ceph-Admins@DOMAIN.LOCAL` |
+| NVIDIA | `svc-nvidia` | `NVIDIA-Admins@DOMAIN.LOCAL` |
+
+Members of `Infrastructure-Admins@DOMAIN.LOCAL` have access to all service accounts.
+
+### Emergency Access
+
+In case of AD outage, root password is stored in Keeper password manager. See `docs/tugboat-node-setup.md` for emergency procedures.
 
 ## 🧪 Testing
 
@@ -340,7 +362,7 @@ aws ssm describe-instance-information \
   --filters "Key=tag:Name,Values=ansible-ssm-test"
 
 # Run Ansible playbook
-ansible-playbook -i inventory.aws_ec2.yml change-hostname.yml
+tug deploy -i inventory.aws_ec2.yml change-hostname.yml
 
 # Clean up
 ./cleanup.sh
@@ -354,23 +376,34 @@ See `tests/example/README.md` for complete walkthrough.
 # Syntax check all playbooks
 for playbook in playbooks/*.yml; do
   echo "Checking $playbook..."
-  ansible-playbook --syntax-check $playbook
+  tug deploy --syntax-check $playbook
 done
 
 # Lint playbooks
-pip install ansible-lint
-ansible-lint playbooks/
+pip install # ansible-lint (if using ansible backend)
+# ansible-lint (if using ansible backend) playbooks/
 
 # Dry run against inventory
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --check --diff
+tug deploy -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --check --diff
 ```
 
-## 📚 Documentation
+## Documentation
 
+### Tugboat Operations
+- **[docs/tugboat-admin-guide.md](docs/tugboat-admin-guide.md)**: How to execute Tugboat automation
+- **[docs/tugboat-access-control.md](docs/tugboat-access-control.md)**: AD groups, service accounts, PAM configuration
+- **[docs/tugboat-audit-compliance.md](docs/tugboat-audit-compliance.md)**: Audit trail, log retention, compliance
+- **[docs/tugboat-node-setup.md](docs/tugboat-node-setup.md)**: Management VM configuration
+
+### Architecture
 - **[CLAUDE.md](CLAUDE.md)**: Complete architecture documentation and guidance for Claude Code
+
+### Infrastructure
 - **[proxmox/README.md](proxmox/README.md)**: Proxmox VE cluster overview and hardware specifications
 - **[proxmox/DEPLOYMENT.md](proxmox/DEPLOYMENT.md)**: Phase-by-phase deployment plan for Proxmox
 - **[weka/README.md](weka/README.md)**: Weka cluster overview and hardware specifications
+
+### Testing
 - **[tests/example/README.md](tests/example/README.md)**: AWS EC2 test example walkthrough
 
 ## 🛠️ Common Operations
@@ -386,7 +419,7 @@ aws ssm put-parameter --name /proxmox/cl1/n04/mac --value "aa:bb:cc:44:55:66" --
 python3 inventory/ssm_plugin.py --host n04
 
 # 3. Run playbook (will automatically detect new node)
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit n04
+tug deploy -i inventory/ssm_plugin.py playbooks/setup_proxmox.yml --limit n04
 ```
 
 ### Update a Configuration Value
@@ -400,7 +433,7 @@ aws ssm put-parameter \
   --overwrite
 
 # 2. Re-run playbook (uses new value automatically)
-ansible-playbook -i inventory/ssm_plugin.py playbooks/setup_weka.yml
+tug deploy -i inventory/ssm_plugin.py playbooks/setup_weka.yml
 ```
 
 ### Debug Inventory Issues
